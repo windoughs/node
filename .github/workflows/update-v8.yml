@@ -37,7 +37,14 @@ jobs:
         run: npm install -g @node-core/utils
       - name: Check and download new V8 version
         run: |
-            ./tools/dep_updaters/update-v8-patch.sh
+            ./tools/dep_updaters/update-v8-patch.sh > temp-output
+            echo "1"
+            cat temp-output
+            echo "2"
+            tail -n1 temp-output | grep "NEW_VERSION=" >> "$GITHUB_ENV" || true
+            echo "3"
+            rm temp-output
+            echo "4"
       - uses: gr2m/create-or-update-pull-request-action@77596e3166f328b24613f7082ab30bf2d93079d5
         # Creates a PR or update the Action's existing PR, or
         # no-op if the base branch is already up-to-date.
