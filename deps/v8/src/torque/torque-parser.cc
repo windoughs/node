@@ -57,6 +57,11 @@ class BuildFlags : public base::ContextualClass<BuildFlags> {
 #else
     build_flags_["V8_ENABLE_JAVASCRIPT_PROMISE_HOOKS"] = false;
 #endif
+#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+    build_flags_["V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA"] = true;
+#else
+    build_flags_["V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA"] = false;
+#endif
     build_flags_["TRUE_FOR_TESTING"] = true;
     build_flags_["FALSE_FOR_TESTING"] = false;
 #ifdef V8_SCRIPTORMODULE_LEGACY_LIFETIME
@@ -70,8 +75,6 @@ class BuildFlags : public base::ContextualClass<BuildFlags> {
     build_flags_["V8_ENABLE_WEBASSEMBLY"] = false;
 #endif
     build_flags_["V8_ENABLE_SANDBOX"] = V8_ENABLE_SANDBOX_BOOL;
-    build_flags_["V8_CODE_POINTER_SANDBOXING"] =
-        V8_CODE_POINTER_SANDBOXING_BOOL;
     build_flags_["DEBUG"] = DEBUG_BOOL;
   }
   static bool GetFlag(const std::string& name, const char* production) {

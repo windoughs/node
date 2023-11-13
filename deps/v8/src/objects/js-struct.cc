@@ -13,7 +13,7 @@ namespace internal {
 
 namespace {
 
-void PrepareMapCommon(Map map) {
+void PrepareMapCommon(Tagged<Map> map) {
   DCHECK(IsAlwaysSharedSpaceJSObjectMap(map));
   DisallowGarbageCollection no_gc;
   // Shared objects have fixed layout ahead of time, so there's no slack.
@@ -32,6 +32,15 @@ void PrepareMapCommon(Map map) {
 void AlwaysSharedSpaceJSObject::PrepareMapNoEnumerableProperties(
     Tagged<Map> map) {
   PrepareMapCommon(map);
+  map->SetEnumLength(0);
+}
+
+// static
+void AlwaysSharedSpaceJSObject::PrepareMapNoEnumerableProperties(
+    Isolate* isolate, Tagged<Map> map, Tagged<DescriptorArray> descriptors) {
+  PrepareMapCommon(map);
+  map->InitializeDescriptors(isolate, *descriptors);
+  DCHECK_EQ(0, map->NumberOfEnumerableProperties());
   map->SetEnumLength(0);
 }
 
@@ -100,6 +109,15 @@ Maybe<bool> AlwaysSharedSpaceJSObject::HasInstance(
     if (!iter.AdvanceFollowingProxies()) return Nothing<bool>();
     if (iter.IsAtEnd()) return Just(false);
   }
+}
+
+// static
+bool JSSharedStruct::IsElementsTemplateDescriptor(Isolate* isolate,
+                                                  Tagged<Map> instance_map,
+                                                  InternalIndex i) {
+  DCHECK(IsJSSharedStructMap(instance_map));
+  return instance_map->instance_descriptors(isolate)->GetKey(i) ==
+         ReadOnlyRoots(isolate).class_fields_symbol();
 }
 
 }  // namespace internal

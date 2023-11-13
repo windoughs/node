@@ -12,6 +12,7 @@
 #include "src/objects/deoptimization-data-inl.h"
 #include "src/objects/instance-type-inl.h"
 #include "src/objects/instruction-stream-inl.h"
+#include "src/objects/trusted-object-inl.h"
 #include "src/snapshot/embedded/embedded-data-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -20,7 +21,7 @@
 namespace v8 {
 namespace internal {
 
-OBJECT_CONSTRUCTORS_IMPL(Code, HeapObject)
+OBJECT_CONSTRUCTORS_IMPL(Code, ExposedTrustedObject)
 OBJECT_CONSTRUCTORS_IMPL(GcSafeCode, HeapObject)
 
 CAST_ACCESSOR(GcSafeCode)
@@ -98,11 +99,31 @@ ACCESSORS_CHECKED2(Code, deoptimization_data, Tagged<FixedArray>,
                    kind() != CodeKind::BASELINE,
                    kind() != CodeKind::BASELINE &&
                        !ObjectInYoungGeneration(value))
-ACCESSORS_CHECKED2(Code, bytecode_or_interpreter_data, Tagged<HeapObject>,
-                   kDeoptimizationDataOrInterpreterDataOffset,
-                   kind() == CodeKind::BASELINE,
-                   kind() == CodeKind::BASELINE &&
-                       !ObjectInYoungGeneration(value))
+
+Tagged<HeapObject> Code::bytecode_or_interpreter_data(
+    const Isolate* isolate) const {
+  DCHECK_EQ(kind(), CodeKind::BASELINE);
+  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
+  Tagged<HeapObject> value =
+      TaggedField<HeapObject, kDeoptimizationDataOrInterpreterDataOffset>::load(
+          cage_base, *this);
+  if (IsBytecodeWrapper(value)) {
+    return BytecodeWrapper::cast(value)->bytecode(isolate);
+  }
+  return value;
+}
+void Code::set_bytecode_or_interpreter_data(Tagged<HeapObject> value,
+                                            WriteBarrierMode mode) {
+  DCHECK(kind() == CodeKind::BASELINE && !ObjectInYoungGeneration(value));
+  if (IsBytecodeArray(value)) {
+    value = BytecodeArray::cast(value)->wrapper();
+  }
+  TaggedField<HeapObject, kDeoptimizationDataOrInterpreterDataOffset>::store(
+      *this, value);
+  CONDITIONAL_WRITE_BARRIER(*this, kDeoptimizationDataOrInterpreterDataOffset,
+                            value, mode);
+}
+
 ACCESSORS_CHECKED2(Code, source_position_table, Tagged<ByteArray>,
                    kPositionTableOffset, kind() != CodeKind::BASELINE,
                    kind() != CodeKind::BASELINE &&
@@ -498,7 +519,7 @@ void Code::IterateDeoptimizationLiterals(RootVisitor* v) {
   Tagged<DeoptimizationLiteralArray> literals = deopt_data->LiteralArray();
   const int literals_length = literals->length();
   for (int i = 0; i < literals_length; ++i) {
-    MaybeObject maybe_literal = literals->Get(i);
+    MaybeObject maybe_literal = literals->get_raw(i);
     Tagged<HeapObject> heap_literal;
     if (maybe_literal.GetHeapObject(&heap_literal)) {
       v->VisitRootPointer(Root::kStackRoots, "deoptimization literal",
@@ -592,22 +613,19 @@ Tagged<Object> Code::raw_instruction_stream(PtrComprCageBase cage_base,
 }
 
 DEF_GETTER(Code, instruction_start, Address) {
-  return ReadCodeEntrypointField(kInstructionStartOffset);
-}
-
-void Code::init_instruction_start(Isolate* isolate, Address value) {
-#ifdef V8_CODE_POINTER_SANDBOXING
-  // In this case, the instruction_start is stored in this Code's code pointer
-  // table entry, so initialize that instead.
-  InitCodePointerTableEntryField(kCodePointerTableEntryOffset, isolate, *this,
-                                 value);
+#ifdef V8_ENABLE_SANDBOX
+  return ReadCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset);
 #else
-  WriteCodeEntrypointField(kInstructionStartOffset, value);
+  return ReadField<Address>(kInstructionStartOffset);
 #endif
 }
 
 void Code::set_instruction_start(Isolate* isolate, Address value) {
-  WriteCodeEntrypointField(kInstructionStartOffset, value);
+#ifdef V8_ENABLE_SANDBOX
+  WriteCodeEntrypointViaCodePointerField(kSelfIndirectPointerOffset, value);
+#else
+  WriteField<Address>(kInstructionStartOffset, value);
+#endif
 }
 
 void Code::SetInstructionStreamAndInstructionStart(
@@ -624,12 +642,13 @@ void Code::SetInstructionStartForOffHeapBuiltin(Isolate* isolate_for_sandbox,
 }
 
 void Code::ClearInstructionStartForSerialization(Isolate* isolate) {
-#ifdef V8_CODE_POINTER_SANDBOXING
-  WriteField<CodePointerHandle>(kInstructionStartOffset,
+#ifdef V8_ENABLE_SANDBOX
+  // The instruction start is stored in this object's code pointer table.
+  WriteField<CodePointerHandle>(kSelfIndirectPointerOffset,
                                 kNullCodePointerHandle);
 #else
   set_instruction_start(isolate, kNullAddress);
-#endif  // V8_CODE_POINTER_SANDBOXING
+#endif  // V8_ENABLE_SANDBOX
 }
 
 void Code::UpdateInstructionStart(Isolate* isolate_for_sandbox,

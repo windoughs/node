@@ -125,18 +125,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
  public:
   inline ReadOnlyRoots read_only_roots() const;
 
-  Handle<Oddball> NewOddball(Handle<Map> map, const char* to_string,
-                             Handle<Object> to_number, const char* type_of,
-                             uint8_t kind);
-
   Handle<Hole> NewHole();
-
-  // Marks self references within code generation.
-  Handle<Oddball> NewSelfReferenceMarker();
-
-  // Marks references to a function's basic-block usage counters array during
-  // code generation.
-  Handle<Oddball> NewBasicBlockCountersMarker();
 
   // Allocates a property array initialized with undefined values.
   Handle<PropertyArray> NewPropertyArray(
@@ -149,10 +138,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   V8_WARN_UNUSED_RESULT
   MaybeHandle<FixedArray> TryNewFixedArray(
       int length, AllocationType allocation = AllocationType::kYoung);
-
-  // Allocates a closure feedback cell array whose feedback cells are
-  // initialized with undefined values.
-  Handle<ClosureFeedbackCellArray> NewClosureFeedbackCellArray(int num_slots);
 
   // Allocates a feedback vector whose slots are initialized with undefined
   // values.
@@ -762,7 +747,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   // Allocates a bound function.
   MaybeHandle<JSBoundFunction> NewJSBoundFunction(
       Handle<JSReceiver> target_function, Handle<Object> bound_this,
-      base::Vector<Handle<Object>> bound_args);
+      base::Vector<Handle<Object>> bound_args, Handle<HeapObject> prototype);
 
   // Allocates a Harmony proxy.
   Handle<JSProxy> NewJSProxy(Handle<JSReceiver> target,
@@ -802,7 +787,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   // Interface for creating error objects.
   Handle<JSObject> NewError(Handle<JSFunction> constructor,
-                            Handle<String> message);
+                            Handle<String> message,
+                            Handle<Object> options = Handle<Object>());
 
   Handle<Object> NewInvalidStringLengthError();
 
@@ -810,15 +796,28 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
 
   Handle<JSObject> NewError(Handle<JSFunction> constructor,
                             MessageTemplate template_index,
-                            Handle<Object> arg0 = Handle<Object>(),
-                            Handle<Object> arg1 = Handle<Object>(),
-                            Handle<Object> arg2 = Handle<Object>());
+                            base::Vector<const Handle<Object>> args);
 
-#define DECLARE_ERROR(NAME)                                          \
-  Handle<JSObject> New##NAME(MessageTemplate template_index,         \
-                             Handle<Object> arg0 = Handle<Object>(), \
-                             Handle<Object> arg1 = Handle<Object>(), \
-                             Handle<Object> arg2 = Handle<Object>());
+  template <typename... Args,
+            typename = std::enable_if_t<std::conjunction_v<
+                std::is_convertible<Args, Handle<Object>>...>>>
+  Handle<JSObject> NewError(Handle<JSFunction> constructor,
+                            MessageTemplate template_index, Args... args) {
+    return NewError(constructor, template_index,
+                    base::VectorOf<Handle<Object>>({args...}));
+  }
+
+#define DECLARE_ERROR(NAME)                                                  \
+  Handle<JSObject> New##NAME(MessageTemplate template_index,                 \
+                             base::Vector<const Handle<Object>> args);       \
+                                                                             \
+  template <typename... Args,                                                \
+            typename = std::enable_if_t<std::conjunction_v<                  \
+                std::is_convertible<Args, Handle<Object>>...>>>              \
+  Handle<JSObject> New##NAME(MessageTemplate template_index, Args... args) { \
+    return New##NAME(template_index,                                         \
+                     base::VectorOf<Handle<Object>>({args...}));             \
+  }
   DECLARE_ERROR(Error)
   DECLARE_ERROR(EvalError)
   DECLARE_ERROR(RangeError)
@@ -888,7 +887,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   Handle<StoreHandler> NewStoreHandler(int data_count);
   Handle<MegaDomHandler> NewMegaDomHandler(MaybeObjectHandle accessor,
                                            MaybeObjectHandle context);
-  Handle<RegExpMatchInfo> NewRegExpMatchInfo();
 
   // Creates a new FixedArray that holds the data associated with the
   // atom regexp and stores it in the regexp.
@@ -924,7 +922,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
   }
 
   Handle<JSSharedStruct> NewJSSharedStruct(
-      Handle<JSFunction> constructor, Handle<Object> maybe_elements_template);
+      Handle<JSFunction> constructor,
+      MaybeHandle<NumberDictionary> maybe_elements_template);
 
   Handle<JSSharedArray> NewJSSharedArray(Handle<JSFunction> constructor,
                                          int length);

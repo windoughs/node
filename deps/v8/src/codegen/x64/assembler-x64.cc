@@ -925,7 +925,7 @@ void Assembler::shift(Operand dst, int subcode, int size) {
 
 void Assembler::bswapl(Register dst) {
   EnsureSpace ensure_space(this);
-  emit_rex_32(dst);
+  emit_optional_rex_32(dst);
   emit(0x0F);
   emit(0xC8 + dst.low_bits());
 }
@@ -3608,6 +3608,15 @@ void Assembler::vperm2f128(YMMRegister dst, YMMRegister src1, YMMRegister src2,
   emit_vex_prefix(dst, src1, src2, kL256, k66, k0F3A, kW0);
   emit(0x06);
   emit_sse_operand(dst, src2);
+  emit(imm8);
+}
+
+void Assembler::vextractf128(XMMRegister dst, YMMRegister src, uint8_t imm8) {
+  DCHECK(IsEnabled(AVX));
+  EnsureSpace ensure_space(this);
+  emit_vex_prefix(src, xmm0, dst, kL256, k66, k0F3A, kW0);
+  emit(0x19);
+  emit_sse_operand(src, dst);
   emit(imm8);
 }
 

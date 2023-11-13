@@ -498,7 +498,9 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
 
 Tagged<String> JSReceiver::class_name() {
   ReadOnlyRoots roots = GetReadOnlyRoots();
-  if (IsFunction(*this)) return roots.Function_string();
+  if (IsJSFunctionOrBoundFunctionOrWrappedFunction(*this)) {
+    return roots.Function_string();
+  }
   if (IsJSArgumentsObject(*this)) return roots.Arguments_string();
   if (IsJSArray(*this)) return roots.Array_string();
   if (IsJSArrayBuffer(*this)) {
@@ -636,7 +638,7 @@ Handle<String> JSReceiver::GetConstructorName(Isolate* isolate,
   return GetConstructorHelper(isolate, receiver).second;
 }
 
-base::Optional<NativeContext> JSReceiver::GetCreationContextRaw() {
+base::Optional<Tagged<NativeContext>> JSReceiver::GetCreationContextRaw() {
   DisallowGarbageCollection no_gc;
   Tagged<JSFunction> function;
   {
@@ -667,7 +669,7 @@ base::Optional<NativeContext> JSReceiver::GetCreationContextRaw() {
 }
 
 MaybeHandle<NativeContext> JSReceiver::GetCreationContext() {
-  base::Optional<NativeContext> maybe_context = GetCreationContextRaw();
+  base::Optional<Tagged<NativeContext>> maybe_context = GetCreationContextRaw();
   if (!maybe_context.has_value()) return {};
   return handle(maybe_context.value(), GetIsolate());
 }
@@ -1853,15 +1855,13 @@ Maybe<bool> GetPropertyDescriptorWithInterceptor(LookupIterator* it,
       it->Next();
     } else {
       interceptor = it->GetInterceptorForFailedAccessCheck();
-      if (interceptor.is_null() &&
-          (!JSObject::AllCanRead(it) ||
-           it->state() != LookupIterator::INTERCEPTOR)) {
+      if (interceptor.is_null()) {
         it->Restart();
         return Just(false);
       }
+      CHECK(!interceptor.is_null());
     }
   }
-
   if (it->state() == LookupIterator::INTERCEPTOR) {
     interceptor = it->GetInterceptor();
   }
@@ -2273,7 +2273,7 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastGetOwnValuesOrEntries(
   }
 
   DCHECK_LE(count, values_or_entries->length());
-  *result = FixedArray::ShrinkOrEmpty(isolate, values_or_entries, count);
+  *result = FixedArray::RightTrimOrEmpty(isolate, values_or_entries, count);
   return Just(true);
 }
 
@@ -2304,8 +2304,7 @@ MaybeHandle<FixedArray> GetOwnValuesOrEntries(Isolate* isolate,
   int length = 0;
 
   for (int i = 0; i < keys->length(); ++i) {
-    Handle<Name> key =
-        Handle<Name>::cast(handle(keys->get(isolate, i), isolate));
+    Handle<Name> key(Name::cast(keys->get(i)), isolate);
 
     if (filter & ONLY_ENUMERABLE) {
       PropertyDescriptor descriptor;
@@ -2332,7 +2331,7 @@ MaybeHandle<FixedArray> GetOwnValuesOrEntries(Isolate* isolate,
     length++;
   }
   DCHECK_LE(length, values_or_entries->length());
-  return FixedArray::ShrinkOrEmpty(isolate, values_or_entries, length);
+  return FixedArray::RightTrimOrEmpty(isolate, values_or_entries, length);
 }
 
 MaybeHandle<FixedArray> JSReceiver::GetOwnValues(Isolate* isolate,
@@ -2669,51 +2668,13 @@ int JSObject::GetHeaderSize(InstanceType type,
   }
 }
 
-// static
-bool JSObject::AllCanRead(LookupIterator* it) {
-  // Skip current iteration, it's in state ACCESS_CHECK or INTERCEPTOR, both of
-  // which have already been checked.
-  DCHECK(it->state() == LookupIterator::ACCESS_CHECK ||
-         it->state() == LookupIterator::INTERCEPTOR);
-  if (it->IsPrivateName()) {
-    return false;
-  }
-  for (it->Next(); it->IsFound(); it->Next()) {
-    if (it->state() == LookupIterator::ACCESSOR) {
-      auto accessors = it->GetAccessors();
-      if (IsAccessorInfo(*accessors)) {
-        if (AccessorInfo::cast(*accessors)->all_can_read()) return true;
-      }
-    } else if (it->state() == LookupIterator::INTERCEPTOR) {
-      if (it->GetInterceptor()->all_can_read()) return true;
-    } else if (it->state() == LookupIterator::JSPROXY) {
-      // Stop lookupiterating. And no, AllCanNotRead.
-      return false;
-    }
-  }
-  return false;
-}
-
 MaybeHandle<Object> JSObject::GetPropertyWithFailedAccessCheck(
     LookupIterator* it) {
   Isolate* isolate = it->isolate();
   Handle<JSObject> checked = it->GetHolder<JSObject>();
   Handle<InterceptorInfo> interceptor =
       it->GetInterceptorForFailedAccessCheck();
-  if (interceptor.is_null()) {
-    while (AllCanRead(it)) {
-      if (it->state() == LookupIterator::ACCESSOR) {
-        return Object::GetPropertyWithAccessor(it);
-      }
-      DCHECK_EQ(LookupIterator::INTERCEPTOR, it->state());
-      bool done;
-      Handle<Object> result;
-      ASSIGN_RETURN_ON_EXCEPTION(isolate, result,
-                                 GetPropertyWithInterceptor(it, &done), Object);
-      if (done) return result;
-    }
-
-  } else {
+  if (!interceptor.is_null()) {
     Handle<Object> result;
     bool done;
     ASSIGN_RETURN_ON_EXCEPTION(
@@ -2740,17 +2701,7 @@ Maybe<PropertyAttributes> JSObject::GetPropertyAttributesWithFailedAccessCheck(
   Handle<JSObject> checked = it->GetHolder<JSObject>();
   Handle<InterceptorInfo> interceptor =
       it->GetInterceptorForFailedAccessCheck();
-  if (interceptor.is_null()) {
-    while (AllCanRead(it)) {
-      if (it->state() == LookupIterator::ACCESSOR) {
-        return Just(it->property_attributes());
-      }
-      DCHECK_EQ(LookupIterator::INTERCEPTOR, it->state());
-      auto result = GetPropertyAttributesWithInterceptor(it);
-      if (isolate->has_scheduled_exception()) break;
-      if (result.IsJust() && result.FromJust() != ABSENT) return result;
-    }
-  } else {
+  if (!interceptor.is_null()) {
     Maybe<PropertyAttributes> result =
         GetPropertyAttributesWithInterceptorInternal(it, interceptor);
     if (isolate->has_pending_exception()) return Nothing<PropertyAttributes>();
@@ -2761,33 +2712,13 @@ Maybe<PropertyAttributes> JSObject::GetPropertyAttributesWithFailedAccessCheck(
   UNREACHABLE();
 }
 
-// static
-bool JSObject::AllCanWrite(LookupIterator* it) {
-  if (it->IsPrivateName()) {
-    return false;
-  }
-  for (; it->IsFound() && it->state() != LookupIterator::JSPROXY; it->Next()) {
-    if (it->state() == LookupIterator::ACCESSOR) {
-      Handle<Object> accessors = it->GetAccessors();
-      if (IsAccessorInfo(*accessors)) {
-        if (AccessorInfo::cast(*accessors)->all_can_write()) return true;
-      }
-    }
-  }
-  return false;
-}
-
 Maybe<bool> JSObject::SetPropertyWithFailedAccessCheck(
     LookupIterator* it, Handle<Object> value, Maybe<ShouldThrow> should_throw) {
   Isolate* isolate = it->isolate();
   Handle<JSObject> checked = it->GetHolder<JSObject>();
   Handle<InterceptorInfo> interceptor =
       it->GetInterceptorForFailedAccessCheck();
-  if (interceptor.is_null()) {
-    if (AllCanWrite(it)) {
-      return Object::SetPropertyWithAccessor(it, value, should_throw);
-    }
-  } else {
+  if (!interceptor.is_null()) {
     Maybe<bool> result = SetPropertyWithInterceptorInternal(
         it, interceptor, should_throw, value);
     if (isolate->has_pending_exception()) return Nothing<bool>();
@@ -3083,21 +3014,23 @@ void JSObject::PrintInstanceMigration(FILE* file, Tagged<Map> original_map,
   PrintF(file, "\n");
 }
 
+// static
 bool JSObject::IsUnmodifiedApiObject(FullObjectSlot o) {
   Tagged<Object> object = *o;
   if (IsSmi(object)) return false;
   Tagged<HeapObject> heap_object = HeapObject::cast(object);
-  if (!IsJSObject(object)) return false;
-  Tagged<JSObject> js_object = JSObject::cast(object);
-  if (!js_object->IsDroppableApiObject()) return false;
-  Tagged<Object> maybe_constructor = js_object->map()->GetConstructor();
+  Tagged<Map> map = heap_object->map();
+  if (!InstanceTypeChecker::IsJSObject(map)) return false;
+  if (!JSObject::IsDroppableApiObject(map)) return false;
+  Tagged<Object> maybe_constructor = map->GetConstructor();
   if (!IsJSFunction(maybe_constructor)) return false;
-  Tagged<JSFunction> constructor = JSFunction::cast(maybe_constructor);
+  Tagged<JSObject> js_object = JSObject::cast(object);
   if (js_object->elements()->length() != 0) return false;
   // Check that the object is not a key in a WeakMap (over-approximation).
   if (!IsUndefined(js_object->GetIdentityHash())) return false;
 
-  return constructor->initial_map() == heap_object->map();
+  Tagged<JSFunction> constructor = JSFunction::cast(maybe_constructor);
+  return constructor->initial_map() == map;
 }
 
 // static
@@ -3325,7 +3258,7 @@ void MigrateFastToFast(Isolate* isolate, Handle<JSObject> object,
   int limit = std::min(inobject, number_of_fields);
   for (int i = 0; i < limit; i++) {
     FieldIndex index = FieldIndex::ForPropertyIndex(*new_map, i);
-    Tagged<Object> value = inobject_props->get(isolate, i);
+    Tagged<Object> value = inobject_props->get(i);
     object->FastPropertyAtPut(index, value);
   }
 
@@ -5141,7 +5074,7 @@ void InvalidateOnePrototypeValidityCellInternal(Tagged<Map> map) {
   }
   Tagged<PrototypeInfo> prototype_info;
   if (map->TryGetPrototypeInfo(&prototype_info)) {
-    prototype_info->set_prototype_chain_enum_cache(Object());
+    prototype_info->set_prototype_chain_enum_cache(Tagged<Object>());
   }
 
   // We may inline accesses to constants stored in dictionary mode prototypes in
@@ -5427,7 +5360,7 @@ Maybe<bool> JSObject::AddDataElement(Handle<JSObject> object, uint32_t index,
   Tagged<FixedArrayBase> elements = object->elements(isolate);
   ElementsKind dictionary_kind = DICTIONARY_ELEMENTS;
   if (IsSloppyArgumentsElementsKind(kind)) {
-    elements = SloppyArgumentsElements::cast(elements)->arguments(isolate);
+    elements = SloppyArgumentsElements::cast(elements)->arguments();
     dictionary_kind = SLOW_SLOPPY_ARGUMENTS_ELEMENTS;
   } else if (IsStringWrapperElementsKind(kind)) {
     dictionary_kind = SLOW_STRING_WRAPPER_ELEMENTS;

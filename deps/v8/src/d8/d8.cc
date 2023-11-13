@@ -124,6 +124,9 @@ namespace v8 {
 
 namespace {
 
+// Set on worker threads to the current Worker instance.
+thread_local Worker* current_worker_ = nullptr;
+
 #ifdef V8_FUZZILLI
 // REPRL = read-eval-print-reset-loop
 // These file descriptors are being opened when Fuzzilli uses fork & execve to
@@ -254,7 +257,7 @@ class MockArrayBufferAllocatiorWithLimit : public MockArrayBufferAllocator {
   std::atomic<size_t> space_left_;
 };
 
-#if MULTI_MAPPED_ALLOCATOR_AVAILABLE
+#ifdef V8_OS_LINUX
 
 // This is a mock allocator variant that provides a huge virtual allocation
 // backed by a small real allocation that is repeatedly mapped. If you create an
@@ -292,8 +295,25 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
       // Other errors may be bugs which we want to learn about.
       FATAL("mmap (real) failed with error %d: %s", errno, strerror(errno));
     }
+#ifdef V8_ENABLE_SANDBOX
+    // The backing memory must be allocated inside the sandbox as it will be
+    // used for array buffer contents.
+    // Here we go into somewhat less-well-defined territory by using the
+    // sandbox's virtual address space to essentially just reserve a number of
+    // OS pages inside the sandbox, but then using mremap to replace these
+    // pages directly afterwards. In practice, this works fine however.
+    VirtualAddressSpace* vas = i::GetProcessWideSandbox()->address_space();
+    i::Address in_sandbox_page_reservation = vas->AllocatePages(
+        VirtualAddressSpace::kNoHint, rounded_length,
+        vas->allocation_granularity(), PagePermissions::kNoAccess);
+    void* virtual_alloc =
+        in_sandbox_page_reservation != 0
+            ? reinterpret_cast<void*>(in_sandbox_page_reservation)
+            : reinterpret_cast<void*>(-1);
+#else
     void* virtual_alloc =
         mmap(nullptr, rounded_length, prot, flags | MAP_NORESERVE, -1, 0);
+#endif
     if (reinterpret_cast<intptr_t>(virtual_alloc) == -1) {
       if (errno == ENOMEM) {
         // Undo earlier, successful mappings.
@@ -316,7 +336,11 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
         if (errno == ENOMEM) {
           // Undo earlier, successful mappings.
           munmap(real_alloc, kChunkSize);
-          munmap(virtual_alloc, (to_map - virtual_base));
+#ifdef V8_ENABLE_SANDBOX
+          vas->FreePages(in_sandbox_page_reservation, rounded_length);
+#else
+          munmap(virtual_alloc, rounded_length);
+#endif
           return nullptr;
         }
         FATAL("mremap failed with error %d: %s", errno, strerror(errno));
@@ -335,7 +359,12 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
     void* real_alloc = regions_[data];
     munmap(real_alloc, kChunkSize);
     size_t rounded_length = RoundUp(length, kChunkSize);
+#ifdef V8_ENABLE_SANDBOX
+    VirtualAddressSpace* vas = i::GetProcessWideSandbox()->address_space();
+    vas->FreePages(reinterpret_cast<i::Address>(data), rounded_length);
+#else
     munmap(data, rounded_length);
+#endif
     regions_.erase(data);
   }
 
@@ -347,7 +376,7 @@ class MultiMappedAllocator : public ArrayBufferAllocatorBase {
   base::Mutex regions_mutex_;
 };
 
-#endif  // MULTI_MAPPED_ALLOCATOR_AVAILABLE
+#endif  // V8_OS_LINUX
 
 v8::Platform* g_default_platform;
 std::unique_ptr<v8::Platform> g_platform;
@@ -1138,8 +1167,8 @@ MaybeLocal<Module> Shell::FetchModuleTree(Local<Module> referrer,
       return MaybeLocal<Module>();
     }
 
-    std::vector<Local<String>> export_names{
-        String::NewFromUtf8(isolate, "default").ToLocalChecked()};
+    auto export_names = v8::to_array<Local<String>>(
+        {String::NewFromUtf8(isolate, "default").ToLocalChecked()});
 
     module = v8::Module::CreateSyntheticModule(
         isolate,
@@ -1529,10 +1558,11 @@ bool Shell::ExecuteModule(Isolate* isolate, const char* file_name) {
     return false;
   }
 
-  std::vector<std::tuple<Local<Module>, Local<Message>>> stalled =
-      root_module->GetStalledTopLevelAwaitMessage(isolate);
-  if (stalled.size() > 0) {
-    Local<Message> message = std::get<1>(stalled[0]);
+  auto [stalled_modules, stalled_messages] =
+      root_module->GetStalledTopLevelAwaitMessages(isolate);
+  DCHECK_EQ(stalled_modules.size(), stalled_messages.size());
+  if (stalled_messages.size() > 0) {
+    Local<Message> message = stalled_messages[0];
     ReportException(isolate, message, v8::Exception::Error(message->Get()));
     return false;
   }
@@ -3082,6 +3112,18 @@ void Shell::Fuzzilli(const v8::FunctionCallbackInfo<v8::Value>& info) {
         memset(vec.data(), 42, 0x100);
         break;
       }
+      case 7: {
+        if (i::v8_flags.hole_fuzzing) {
+          // This should crash with a segmentation fault only
+          // when --hole-fuzzing is used.
+          char* ptr = reinterpret_cast<char*>(0x414141414141ull);
+          for (int i = 0; i < 1024; i++) {
+            *ptr = 'A';
+            ptr += 1 * i::GB;
+          }
+        }
+        break;
+      }
       default:
         break;
     }
@@ -3867,6 +3909,15 @@ void Shell::WriteLcovData(v8::Isolate* isolate, const char* file) {
 
 void Shell::OnExit(v8::Isolate* isolate, bool dispose) {
   platform::NotifyIsolateShutdown(g_default_platform, isolate);
+
+  if (Worker* worker = Worker::GetCurrentWorker()) {
+    // When invoking `quit` on a worker isolate, the worker needs to reach
+    // State::kTerminated before invoking Isolate::Dispose. This is because the
+    // main thread tries to terminate all workers at the end, which can happen
+    // concurrently to Isolate::Dispose.
+    worker->EnterTerminatedState();
+  }
+
   isolate->Dispose();
 
   // Simulate errors before disposing V8, as that resets flags (via
@@ -3930,6 +3981,14 @@ void Shell::OnExit(v8::Isolate* isolate, bool dispose) {
       std::cout << "+" << std::string(kNameBoxSize, '-') << "+"
                 << std::string(kValueBoxSize, '-') << "+\n";
     }
+  }
+
+  if (options.dump_system_memory_stats) {
+    int peak_memory_usage = base::OS::GetPeakMemoryUsageKb();
+    std::cout << "System peak memory usage (kb): " << peak_memory_usage
+              << std::endl;
+    // TODO(jdapena): call rusage platform independent call, and extract peak
+    // memory usage to print it
   }
 
   // Only delete the counters if we are done executing; after calling `quit`,
@@ -4638,6 +4697,14 @@ void Worker::Terminate() {
   isolate_->TerminateExecution();
 }
 
+void Worker::EnterTerminatedState() {
+  base::MutexGuard lock_guard(&worker_mutex_);
+  state_.store(State::kTerminated);
+  CHECK(!is_running());
+  task_runner_.reset();
+  task_manager_ = nullptr;
+}
+
 void Worker::ProcessMessage(std::unique_ptr<SerializationData> data) {
   if (!is_running()) return;
   DCHECK_NOT_NULL(isolate_);
@@ -4678,10 +4745,22 @@ void Worker::ProcessMessages() {
   }
 }
 
+// static
+void Worker::SetCurrentWorker(Worker* worker) {
+  CHECK_NULL(current_worker_);
+  current_worker_ = worker;
+}
+
+// static
+Worker* Worker::GetCurrentWorker() { return current_worker_; }
+
 void Worker::ExecuteInThread() {
   Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = Shell::array_buffer_allocator;
   isolate_ = Isolate::New(create_params);
+
+  // Make the Worker instance available to the whole thread.
+  SetCurrentWorker(this);
 
   task_runner_ = g_default_platform->GetForegroundTaskRunner(isolate_);
   task_manager_ =
@@ -4755,13 +4834,7 @@ void Worker::ExecuteInThread() {
       Shell::CollectGarbage(isolate_);
     }
 
-    {
-      base::MutexGuard lock_guard(&worker_mutex_);
-      state_.store(State::kTerminated);
-      CHECK(!is_running());
-      task_runner_.reset();
-      task_manager_ = nullptr;
-    }
+    EnterTerminatedState();
 
     Shell::ResetOnProfileEndListener(isolate_);
     context_.Reset();
@@ -4909,6 +4982,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
     } else if (strcmp(argv[i], "--dump-counters-nvp") == 0) {
       i::v8_flags.slow_histograms = true;
       options.dump_counters_nvp = true;
+      argv[i] = nullptr;
+    } else if (strcmp(argv[i], "--dump-system-memory-stats") == 0) {
+      options.dump_system_memory_stats = true;
       argv[i] = nullptr;
     } else if (strncmp(argv[i], "--icu-data-file=", 16) == 0) {
       options.icu_data_file = argv[i] + 16;
@@ -5077,9 +5153,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
   options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
   options.mock_arraybuffer_allocator_limit =
       i::v8_flags.mock_arraybuffer_allocator_limit;
-#if MULTI_MAPPED_ALLOCATOR_AVAILABLE
+#ifdef V8_OS_LINUX
   options.multi_mapped_mock_allocator = i::v8_flags.multi_mapped_mock_allocator;
-#endif
+#endif  // V8_OS_LINUX
 
   if (i::v8_flags.stress_snapshot && options.expose_fast_api &&
       check_d8_flag_contradictions) {
@@ -5819,19 +5895,19 @@ int Shell::Main(int argc, char* argv[]) {
       memory_limit >= options.mock_arraybuffer_allocator_limit
           ? memory_limit
           : std::numeric_limits<size_t>::max());
-#if MULTI_MAPPED_ALLOCATOR_AVAILABLE
+#ifdef V8_OS_LINUX
   MultiMappedAllocator multi_mapped_mock_allocator;
-#endif
+#endif  // V8_OS_LINUX
   if (options.mock_arraybuffer_allocator) {
     if (memory_limit) {
       Shell::array_buffer_allocator = &mock_arraybuffer_allocator_with_limit;
     } else {
       Shell::array_buffer_allocator = &mock_arraybuffer_allocator;
     }
-#if MULTI_MAPPED_ALLOCATOR_AVAILABLE
+#ifdef V8_OS_LINUX
   } else if (options.multi_mapped_mock_allocator) {
     Shell::array_buffer_allocator = &multi_mapped_mock_allocator;
-#endif
+#endif  // V8_OS_LINUX
   } else {
     Shell::array_buffer_allocator = &shell_array_buffer_allocator;
   }
@@ -5840,7 +5916,7 @@ int Shell::Main(int argc, char* argv[]) {
   if (i::v8_flags.enable_vtunejit) {
     create_params.code_event_handler = vTune::GetVtuneCodeEventHandler();
   }
-#endif
+#endif  // ENABLE_VTUNE_JIT_INTERFACE
   create_params.constraints.ConfigureDefaults(
       base::SysInfo::AmountOfPhysicalMemory(),
       base::SysInfo::AmountOfVirtualMemory());

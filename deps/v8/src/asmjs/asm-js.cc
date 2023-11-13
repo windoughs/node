@@ -72,7 +72,8 @@ bool AreStdlibMembersValid(Isolate* isolate, Handle<JSReceiver> stdlib,
         base::StaticCharVector(#fname)));                                  \
     Handle<Object> value = StdlibMathMember(isolate, stdlib, name);        \
     if (!IsJSFunction(*value)) return false;                               \
-    SharedFunctionInfo shared = Handle<JSFunction>::cast(value)->shared(); \
+    Tagged<SharedFunctionInfo> shared =                                    \
+        Handle<JSFunction>::cast(value)->shared();                         \
     if (!shared->HasBuiltinId() ||                                         \
         shared->builtin_id() != Builtin::kMath##FName) {                   \
       return false;                                                        \
@@ -266,11 +267,12 @@ UnoptimizedCompilationJob::Status AsmJsCompilationJob::FinalizeJobImpl(
 
   // The result is a compiled module and serialized standard library uses.
   wasm::ErrorThrower thrower(isolate, "AsmJs::Compile");
+  Handle<Script> script(Script::cast(shared_info->script()), isolate);
   Handle<AsmWasmData> result =
       wasm::GetWasmEngine()
           ->SyncCompileTranslatedAsmJs(
               isolate, &thrower,
-              wasm::ModuleWireBytes(module_->begin(), module_->end()),
+              wasm::ModuleWireBytes(module_->begin(), module_->end()), script,
               base::VectorOf(*asm_offsets_), uses_bitset,
               shared_info->language_mode())
           .ToHandleChecked();
@@ -280,8 +282,7 @@ UnoptimizedCompilationJob::Status AsmJsCompilationJob::FinalizeJobImpl(
   compilation_info()->SetAsmWasmData(result);
 
   RecordHistograms(isolate);
-  ReportCompilationSuccess(handle(Script::cast(shared_info->script()), isolate),
-                           shared_info->StartPosition(), compile_time_,
+  ReportCompilationSuccess(script, shared_info->StartPosition(), compile_time_,
                            module_->size());
   return SUCCEEDED;
 }

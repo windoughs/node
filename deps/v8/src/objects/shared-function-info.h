@@ -178,7 +178,9 @@ class UncompiledDataWithPreparseDataAndJob
 class InterpreterData
     : public TorqueGeneratedInterpreterData<InterpreterData, Struct> {
  public:
-  using BodyDescriptor = StructBodyDescriptor;
+  DECL_TRUSTED_POINTER_ACCESSORS(bytecode_array, BytecodeArray)
+
+  class BodyDescriptor;
 
  private:
   TQ_OBJECT_CONSTRUCTORS(InterpreterData)
@@ -315,8 +317,9 @@ class SharedFunctionInfo
   inline void DontAdaptArguments();
   inline bool IsDontAdaptArguments() const;
 
-  // [function data]: This field holds some additional data for function.
-  // Currently it has one of:
+  // Returns the data associated with this SFI.
+  //
+  // Currently it can be one of:
   //  - a FunctionTemplateInfo to make benefit the API [IsApiFunction()].
   //  - a BytecodeArray for the interpreter [HasBytecodeArray()].
   //  - a InterpreterData with the BytecodeArray and a copy of the
@@ -328,8 +331,29 @@ class SharedFunctionInfo
   //  - a UncompiledDataWithPreparseData for lazy compilation
   //    [HasUncompiledDataWithPreparseData()]
   //  - a WasmExportedFunctionData for Wasm [HasWasmExportedFunctionData()]
+  //
+  // If the (expected) type of data is known, prefer to use the specialized
+  // accessors (e.g. bytecode_array(), uncompiled_data(), etc.).
+  //
+  // TODO(chromium:1490564): it might be nice if we could split this into a
+  // "code" and a "data" field. The code field is a trusted pointer to
+  // executable code (bytecode or machine code) to run when invoking the
+  // function. The "data" field on the other hand should only contain metadata
+  // about the function and might be empty. GetCode() would then always return
+  // the Code object based on the code field (and possibly lazily compute that
+  // based on the data field, e.g. the builtin id), and GetData() would always
+  // return the additional data, but never any code. This requires going
+  // through the callers of this method to see if they want the code or the
+  // data of the SFI (or both) and making them call GetCode() instead if that's
+  // what they are interested in. It would also mean that for code flushing,
+  // we'd then only have to load the code field, but then had to check if we're
+  // bytecode, baseline code, or builtin code (which is never flushed).
+  inline Tagged<Object> GetData() const;
+
+ private:
   DECL_RELEASE_ACQUIRE_ACCESSORS(function_data, Tagged<Object>)
 
+ public:
   inline bool IsApiFunction() const;
   inline bool is_class_constructor() const;
   DECL_ACCESSORS(api_func_data, Tagged<FunctionTemplateInfo>)
@@ -337,14 +361,21 @@ class SharedFunctionInfo
   template <typename IsolateT>
   inline Tagged<BytecodeArray> GetBytecodeArray(IsolateT* isolate) const;
 
+  // Sets the bytecode for this SFI. This is only allowed when this SFI has not
+  // yet been compiled or if it has been "uncompiled", or in other words when
+  // there is no existing bytecode yet.
   inline void set_bytecode_array(Tagged<BytecodeArray> bytecode);
+  // Like set_bytecode_array but allows overwriting existing bytecode.
+  inline void overwrite_bytecode_array(Tagged<BytecodeArray> bytecode);
+
   DECL_GETTER(InterpreterTrampoline, Tagged<Code>)
   DECL_GETTER(HasInterpreterData, bool)
   DECL_ACCESSORS(interpreter_data, Tagged<InterpreterData>)
   DECL_GETTER(HasBaselineCode, bool)
   DECL_RELEASE_ACQUIRE_ACCESSORS(baseline_code, Tagged<Code>)
-  inline void FlushBaselineCode();
-  DECL_GETTER(GetActiveBytecodeArray, Tagged<BytecodeArray>)
+  inline void FlushBaselineCode(const Isolate* isolate);
+  inline Tagged<BytecodeArray> GetActiveBytecodeArray(
+      const Isolate* isolate) const;
   inline void SetActiveBytecodeArray(Tagged<BytecodeArray> bytecode);
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -757,7 +788,7 @@ static_assert(SharedFunctionInfo::kSize == kStaticRootsSFISize);
 struct SourceCodeOf {
   explicit SourceCodeOf(Tagged<SharedFunctionInfo> v, int max = -1)
       : value(v), max_length(max) {}
-  const SharedFunctionInfo value;
+  const Tagged<SharedFunctionInfo> value;
   int max_length;
 };
 

@@ -55,8 +55,8 @@ namespace internal {
 
 #define BUILTIN_LIST_BASE_TIER1(CPP, TFJ, TFC, TFS, TFH, ASM)                  \
   /* GC write barriers */                                                      \
-  TFC(IndirectPointerBarrierSaveFP, WriteBarrier)                              \
-  TFC(IndirectPointerBarrierIgnoreFP, WriteBarrier)                            \
+  TFC(IndirectPointerBarrierSaveFP, IndirectPointerWriteBarrier)               \
+  TFC(IndirectPointerBarrierIgnoreFP, IndirectPointerWriteBarrier)             \
                                                                                \
   /* TSAN support for stores in generated code. */                             \
   IF_TSAN(TFC, TSANRelaxedStore8IgnoreFP, TSANStore)                           \
@@ -143,6 +143,10 @@ namespace internal {
   TFC(ConstructWithArrayLike_WithFeedback,                                     \
       ConstructWithArrayLike_WithFeedback)                                     \
   ASM(ConstructForwardVarargs, ConstructForwardVarargs)                        \
+  ASM(ConstructForwardAllArgs, ConstructForwardAllArgs)                        \
+  TFC(ConstructForwardAllArgs_Baseline, ConstructForwardAllArgs_Baseline)      \
+  TFC(ConstructForwardAllArgs_WithFeedback,                                    \
+      ConstructForwardAllArgs_WithFeedback)                                    \
   ASM(ConstructFunctionForwardVarargs, ConstructForwardVarargs)                \
   TFC(Construct_Baseline, Construct_Baseline)                                  \
   TFC(Construct_WithFeedback, Construct_WithFeedback)                          \
@@ -181,6 +185,7 @@ namespace internal {
   /* JSFunction in the form of bytecodes */                                    \
   ASM(InterpreterEntryTrampoline, JSTrampoline)                                \
   ASM(InterpreterEntryTrampolineForProfiling, JSTrampoline)                    \
+  ASM(InterpreterForwardAllArgsThenConstruct, ConstructForwardAllArgs)         \
   ASM(InterpreterPushArgsThenCall, InterpreterPushArgsThenCall)                \
   ASM(InterpreterPushUndefinedAndArgsThenCall, InterpreterPushArgsThenCall)    \
   ASM(InterpreterPushArgsThenCallWithFinalSpread, InterpreterPushArgsThenCall) \
@@ -289,16 +294,16 @@ namespace internal {
                                                                                \
   /* Handlers */                                                               \
   TFH(KeyedLoadIC_PolymorphicName, LoadWithVector)                             \
-  TFH(KeyedStoreIC_Megamorphic, Store)                                         \
-  TFH(DefineKeyedOwnIC_Megamorphic, Store)                                     \
+  TFH(KeyedStoreIC_Megamorphic, StoreWithVector)                               \
+  TFH(DefineKeyedOwnIC_Megamorphic, StoreNoFeedback)                           \
   TFH(LoadGlobalIC_NoFeedback, LoadGlobalNoFeedback)                           \
   TFH(LoadIC_FunctionPrototype, LoadWithVector)                                \
   TFH(LoadIC_StringLength, LoadWithVector)                                     \
   TFH(LoadIC_StringWrapperLength, LoadWithVector)                              \
   TFH(LoadIC_NoFeedback, LoadNoFeedback)                                       \
   TFH(StoreGlobalIC_Slow, StoreWithVector)                                     \
-  TFH(StoreIC_NoFeedback, Store)                                               \
-  TFH(DefineNamedOwnIC_NoFeedback, Store)                                      \
+  TFH(StoreIC_NoFeedback, StoreNoFeedback)                                     \
+  TFH(DefineNamedOwnIC_NoFeedback, StoreNoFeedback)                            \
   TFH(KeyedLoadIC_SloppyArguments, LoadWithVector)                             \
   TFH(LoadIndexedInterceptorIC, LoadWithVector)                                \
   TFH(KeyedStoreIC_SloppyArguments_Standard, StoreWithVector)                  \
@@ -414,7 +419,6 @@ namespace internal {
   CPP(ArrayShift)                                                              \
   /* ES6 #sec-array.prototype.unshift */                                       \
   CPP(ArrayUnshift)                                                            \
-  CPP(ArrayFromAsync)                                                          \
   /* Support for Array.from and other array-copying idioms */                  \
   TFS(CloneFastJSArray, NeedsContext::kYes, kSource)                           \
   TFS(CloneFastJSArrayFillingHoles, NeedsContext::kYes, kSource)               \
@@ -602,6 +606,7 @@ namespace internal {
   CPP(FunctionConstructor)                                                     \
   ASM(FunctionPrototypeApply, JSTrampoline)                                    \
   CPP(FunctionPrototypeBind)                                                   \
+  IF_WASM(CPP, WebAssemblyFunctionPrototypeBind)                               \
   ASM(FunctionPrototypeCall, JSTrampoline)                                     \
   /* ES6 #sec-function.prototype.tostring */                                   \
   CPP(FunctionPrototypeToString)                                               \
@@ -656,11 +661,9 @@ namespace internal {
   TFH(LoadSuperICBaseline, LoadWithReceiverBaseline)                           \
   TFH(KeyedLoadIC, KeyedLoadWithVector)                                        \
   TFH(KeyedLoadIC_Megamorphic, KeyedLoadWithVector)                            \
-  TFH(KeyedLoadIC_MegamorphicStringKey, KeyedLoadWithVector)                   \
   TFH(KeyedLoadICTrampoline, KeyedLoad)                                        \
   TFH(KeyedLoadICBaseline, KeyedLoadBaseline)                                  \
   TFH(KeyedLoadICTrampoline_Megamorphic, KeyedLoad)                            \
-  TFH(KeyedLoadICTrampoline_MegamorphicStringKey, KeyedLoad)                   \
   TFH(StoreGlobalIC, StoreGlobalWithVector)                                    \
   TFH(StoreGlobalICTrampoline, StoreGlobal)                                    \
   TFH(StoreGlobalICBaseline, StoreGlobalBaseline)                              \
@@ -672,6 +675,7 @@ namespace internal {
   TFH(DefineNamedOwnICBaseline, StoreBaseline)                                 \
   TFH(KeyedStoreIC, StoreWithVector)                                           \
   TFH(KeyedStoreICTrampoline, Store)                                           \
+  TFH(KeyedStoreICTrampoline_Megamorphic, Store)                               \
   TFH(KeyedStoreICBaseline, StoreBaseline)                                     \
   TFH(DefineKeyedOwnIC, DefineKeyedOwnWithVector)                              \
   TFH(DefineKeyedOwnICTrampoline, DefineKeyedOwn)                              \
@@ -709,6 +713,7 @@ namespace internal {
   TFS(IterableToFixedArrayWithSymbolLookupSlow, NeedsContext::kYes, kIterable) \
   TFS(IterableToListMayPreserveHoles, NeedsContext::kYes, kIterable,           \
       kIteratorFn)                                                             \
+  TFS(IterableToListConvertHoles, NeedsContext::kYes, kIterable, kIteratorFn)  \
   IF_WASM(TFS, IterableToFixedArrayForWasm, NeedsContext::kYes, kIterable,     \
           kExpectedLength)                                                     \
                                                                                \
@@ -1011,6 +1016,7 @@ namespace internal {
   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
   IF_WASM(ASM, WasmResume, WasmDummy)                                          \
   IF_WASM(ASM, WasmReject, WasmDummy)                                          \
+  IF_WASM(ASM, WasmTrapHandlerLandingPad, WasmDummy)                           \
   IF_WASM(ASM, WasmCompileLazy, WasmDummy)                                     \
   IF_WASM(ASM, WasmLiftoffFrameSetup, WasmDummy)                               \
   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \

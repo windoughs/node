@@ -152,7 +152,9 @@ class MinorMarkSweepCollector final {
 
   void TearDown();
   void CollectGarbage();
-  void StartMarking();
+  void StartMarking(bool force_use_background_threads);
+
+  void RequestGC();
 
   EphemeronRememberedSet::TableList* ephemeron_table_list() const {
     return ephemeron_table_list_.get();
@@ -176,6 +178,14 @@ class MinorMarkSweepCollector final {
 
   bool is_in_atomic_pause() const {
     return is_in_atomic_pause_.load(std::memory_order_relaxed);
+  }
+
+  bool gc_finalization_requsted() const {
+    return gc_finalization_requested_.load(std::memory_order_relaxed);
+  }
+
+  bool UseBackgroundThreadsInCycle() const {
+    return use_background_threads_in_cycle_.value();
   }
 
  private:
@@ -227,7 +237,10 @@ class MinorMarkSweepCollector final {
 
   ResizeNewSpaceMode resize_new_space_ = ResizeNewSpaceMode::kNone;
 
+  base::Optional<bool> use_background_threads_in_cycle_;
+
   std::atomic<bool> is_in_atomic_pause_{false};
+  std::atomic<bool> gc_finalization_requested_{false};
 
   friend class IncrementalMarking;
 };

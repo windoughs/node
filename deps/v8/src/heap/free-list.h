@@ -111,7 +111,7 @@ class FreeListCategory {
   uint32_t available_ = 0;
 
   // |top_|: Points to the top FreeSpace in the free list category.
-  FreeSpace top_;
+  Tagged<FreeSpace> top_;
 
   FreeListCategory* prev_ = nullptr;
   FreeListCategory* next_ = nullptr;
@@ -432,7 +432,10 @@ class V8_EXPORT_PRIVATE FreeListManyCachedFastPathBase
   explicit FreeListManyCachedFastPathBase(SmallBlocksMode small_blocks_mode)
       : small_blocks_mode_(small_blocks_mode) {
     if (small_blocks_mode_ == SmallBlocksMode::kProhibit) {
-      min_block_size_ = kFastPathStart;
+      min_block_size_ =
+          (v8_flags.minor_ms && (v8_flags.minor_ms_min_lab_size_kb > 0))
+              ? (v8_flags.minor_ms_min_lab_size_kb * KB)
+              : kFastPathStart;
     }
   }
 
